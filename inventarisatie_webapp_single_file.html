@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Inventarisatie magazijn — Webapp</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial;max-width:980px;margin:18px auto;padding:12px}
+    h1{font-size:20px;margin-bottom:6px}
+    .controls{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+    button{padding:8px 10px;border-radius:8px;border:1px solid #ccc;background:#f7f7f7}
+    button.primary{background:#0b74de;color:white;border:none}
+    #video{width:100%;max-width:480px;border-radius:8px;background:#000}
+    .status{margin:8px 0;padding:8px;border-radius:6px;background:#f1f1f1}
+    table{width:100%;border-collapse:collapse;margin-top:12px}
+    th,td{border:1px solid #ddd;padding:6px;text-align:left}
+    input[type=number]{width:120px}
+    .row-actions{display:flex;gap:6px}
+    @media(min-width:700px){body{padding:24px}}
+  </style>
+</head>
+<body>
+  <h1>Inventarisatie magazijn — Webapp</h1>
+  <p>Korte workflow: <strong>Scan locatie → Scan artikel → Voer aantal in → Opslaan → Volgende</strong></p>
+
+  <div class="controls">
+    <button id="startFlow" class="primary">Start telrun</button>
+    <button id="stopFlow">Stop</button>
+    <button id="manualAdd">Handmatig toevoegen</button>
+    <button id="exportCsv">Export .csv</button>
+    <button id="exportXlsx">Export .xlsx</button>
+    <button id="clearAll">Wis alle regels</button>
+  </div>
+
+  <div class="status" id="status">Status: klaar</div>
+
+  <video id="video" autoplay muted playsinline></video>
+
+  <div style="margin-top:10px">
+    <label>Huidige locatie: <input id="curLocation" readonly /></label>
+    &nbsp;&nbsp;
+    <label>Huidig artikel: <input id="curArticle" readonly /></label>
+    &nbsp;&nbsp;
+    <label>Aantal: <input id="curCount" type="number" min="0" /></label>
+    &nbsp;&nbsp;
+    <button id="saveEntry">Opslaan regel</button>
+  </div>
+
+  <table id="table">
+    <thead><tr><th>#</th><th>Tijd</th><th>Locatie</th><th>Artikel</th><th>Aantal</th><th>Acties</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <script src="https://unpkg.com/@zxing/library@0.19.1/umd/index.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script>
+    // Simple single-file webapp intended to run from an HTTPS server or localhost.
+    // Uses @zxing/library for camera barcode scanning and SheetJS (xlsx) to export XLSX.
+
+    const codeReader = new ZXing.BrowserMultiFormatContinuousReader();
+    const videoElem = document.getElementById('video');
+    const status = document.getElementById('status');
+    const startFlowBtn = document.getElementById('startFlow');
+    const stopFlowBtn = document.getElementById('stopFlow');
+    const manualAddBtn = document.getElementById('manualAdd');
+    const exportCsvBtn = document.getElementById('exportCsv');
+    const exportXlsxBtn = document.getElementById('exportXlsx');
+    const clearAllBtn = document.getElementById('clearAll');
+    const saveEntryBtn = document.getElementById('saveEntry');
+
+    const curLocation = document.getElementById('curLocation');
+    const curArticle = document.getElementById('curArticle');
+    const curCount = document.getElementById('curCount');
+    const tableBody = document.querySelector('#table tbody');
+
+    let entries = [];
+    let flowRunning = false;
+    let step = 'idle'; // idle -> scan-location -> scan-article -> enter-count
+
+    // Helpers
+    function setStatus(txt){ status.textContent = 'Status: ' + txt; }
+    function addEntry(location, article, count){
+      const ts = new Date().toISOString();
+      entries.push({ts, location, article, count});
+      renderTable();
+    }
+    function renderTable(){
+      tableBody.innerHTML = '';
+      entries.forEach((e,i)=>{
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${i+1}</td><td>${e.ts}</td><td>${e.location}</td><td>${e.article}</td><td>${e.count}</td>
+          <td class="row-actions"><button data-i='${i}' class='edit'>Wijzig</button><button data-i='${i}' class='del'>Verwijder</button></td>`;
+        tableBody.appendChild(tr);
+      });
+      // attach actions
+      document.querySelectorAll('.del').forEach(b=>b.onclick = ()=>{ entries.splice(+b.dataset.i,1); renderTable(); });
+      document.querySelectorAll('.edit').forEach(b=>{ b.onclick = ()=>{ const idx=+b.dataset.i; curLocation.value = entries[idx].location; curArticle.value = entries[idx].article; curCount.value = entries[idx].count; entries.splice(idx,1); renderTable(); setStatus('Bewerk regel - bewaar opnieuw'); }; });
+    }
+
+    // Start camera and continuous reader
+    async function startCamera(){
+      try{
+        const devices = await ZXing.BrowserCodeReader.listVideoInputDevices();
+        // choose back camera if available
+        let deviceId = devices.find(d=>/back|rear|environment/gi.test(d.label))?.deviceId || (devices[0] && devices[0].deviceId);
+        await codeReader.decodeFromVideoDevice(deviceId, videoElem, (result, err)=>{
+          if(result){
+            handleScan(result.getText());
+          }
+        });
+        setStatus('Camera gestart — klaar om te scannen');
+      }catch(err){
+        console.error(err); setStatus('Kon camera niet starten: ' + (err.message || err));
+      }
+    }
+
+    function stopCamera(){
+      try{ codeReader.reset(); setStatus('Camera gestopt'); }catch(e){}
+    }
+
+    function handleScan(text){
+      // Avoid double triggers
+      if(!flowRunning) return;
+      if(step === 'scan-location'){
+        curLocation.value = text;
+        setStatus('Locatie gescand: ' + text + ' — nu artikel scannen');
+        step = 'scan-article';
+        // small vibration
+        if(navigator.vibrate) navigator.vibrate(80);
+      } else if(step === 'scan-article'){
+        curArticle.value = text;
+        setStatus('Artikel gescand: ' + text + ' — vul aantal in');
+        step = 'enter-count';
+        if(navigator.vibrate) navigator.vibrate(80);
+        // optionally auto-focus number input
+        curCount.focus();
+      }
+    }
+
+    // Flow control
+    startFlowBtn.onclick = async ()=>{
+      if(flowRunning){ setStatus('Flow draait al'); return; }
+      flowRunning = true;
+      step = 'scan-location';
+      curLocation.value = '';
+      curArticle.value = '';
+      curCount.value = '';
+      await startCamera();
+      setStatus('Start telrun — scan eerst de locatie');
+    };
+
+    stopFlowBtn.onclick = ()=>{
+      flowRunning = false; step='idle'; stopCamera(); setStatus('Flow gestopt');
+    };
+
+    // Save button
+    saveEntryBtn.onclick = ()=>{
+      const location = curLocation.value.trim();
+      const article = curArticle.value.trim();
+      const count = curCount.value.trim();
+      if(!location || !article || count===''){
+        alert('Vul locatie, artikel en aantal in (kan gescand of handmatig)'); return;
+      }
+      addEntry(location, article, count);
+      // clear for next
+      curLocation.value=''; curArticle.value=''; curCount.value='';
+      setStatus('Regel opgeslagen — scan volgende locatie');
+      step = 'scan-location';
+    };
+
+    manualAddBtn.onclick = ()=>{
+      flowRunning = false; step='idle'; stopCamera(); setStatus('Handmatige invoer - vul velden en klik Opslaan');
+    };
+
+    exportCsvBtn.onclick = ()=>{
+      if(entries.length===0){ alert('Geen regels om te exporteren'); return; }
+      const header = ['Tijdstempel','Locatiecode','Artikelnummer','Aantal'];
+      const csv = [header.join(',')].concat(entries.map(e=>[e.ts,e.location,e.article,e.count].map(csvSafe).join(','))).join('\n');
+      downloadBlob(csv, 'inventarisatie.csv', 'text/csv;charset=utf-8;');
+    };
+
+    exportXlsxBtn.onclick = ()=>{
+      if(entries.length===0){ alert('Geen regels om te exporteren'); return; }
+      const ws_data = [['Tijdstempel','Locatiecode','Artikelnummer','Aantal']].concat(entries.map(e=>[e.ts,e.location,e.article,e.count]));
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.aoa_to_sheet(ws_data);
+      XLSX.utils.book_append_sheet(wb, ws, 'Inventarisatie');
+      const wbout = XLSX.write(wb, {bookType:'xlsx', type:'array'});
+      const blob = new Blob([wbout],{type:'application/octet-stream'});
+      downloadBlob(blob, 'inventarisatie.xlsx');
+    };
+
+    clearAllBtn.onclick = ()=>{ if(confirm('Weet je het zeker? Alle regels wissen.')){ entries=[]; renderTable(); } };
+
+    function csvSafe(s){ if(s==null) return ''; const t = String(s).replace(/\"/g,'""'); if(t.indexOf(',')>=0 || t.indexOf('\n')>=0) return '"'+t+'"'; return t; }
+    function downloadBlob(data, filename, mime){
+      const blob = data instanceof Blob ? data : new Blob([data],{type:mime||'text/plain'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    }
+
+    // Stop camera when user leaves page
+    window.addEventListener('beforeunload', ()=>{ try{ codeReader.reset(); }catch(e){} });
+
+    // Notes for user inside the app console
+    console.log('Webapp geladen. Klik "Start telrun" om te beginnen (geef camera toegang).');
+  </script>
+</body>
+</html>
