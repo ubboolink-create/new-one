@@ -1,123 +1,330 @@
-<script src="https://unpkg.com/@zxing/library@latest/umd/index.min.js"></script>
-<script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
-<script>
-let stream = null;
-let reader = null;
-let scanning = false;
-let rowIndex = 1;
-let scanPhase = "locatie"; // "locatie" of "artikel"
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Inventaris Tellen (Kolom P, S, V)</title>
+    <!-- Laad Tailwind CSS voor snelle en responsieve styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styling voor duidelijke weergave in magazijnomgeving */
+        :root {
+            --primary-color: #3b82f6; /* Tailwind blue-500 */
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6; /* Grijsachtige achtergrond */
+        }
+        .count-input {
+            font-size: 2.5rem; /* Grote tekst voor tellen */
+            text-align: center;
+        }
+        .big-text {
+            font-size: 4rem;
+            font-weight: 700;
+        }
+    </style>
+</head>
+<body class="min-h-screen flex items-start justify-center p-4 sm:p-8">
 
-function status(msg) {
-    document.getElementById("status").innerText = "Status: " + msg;
-}
+    <div id="app" class="w-full max-w-4xl bg-white shadow-2xl rounded-xl p-6 sm:p-10">
+        <h1 class="text-3xl font-bold text-gray-800 border-b pb-4 mb-6">Inventaris Tellen App</h1>
 
-async function startCamera() {
-    try {
-        const constraints = {
-            video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
-            audio: false
+        <!-- Laad- en Statusgebied -->
+        <div id="load-area" class="space-y-4 mb-6">
+            <input type="file" id="csvFileInput" accept=".csv" class="w-full p-2 border border-gray-300 rounded-lg">
+            <button onclick="loadInitialData()" class="w-full py-3 px-4 bg-green-500 hover:bg-green-600 text-white font-semibold rounded-lg shadow-md transition duration-150">
+                Laad CSV-bestand
+            </button>
+            <p id="status-message" class="text-sm text-gray-600 mt-2"></p>
+        </div>
+
+        <!-- Tel-interface (standaard verborgen) -->
+        <div id="count-interface" class="hidden space-y-8">
+
+            <!-- Huidige Locatie en Artikel Weergave -->
+            <div class="p-6 bg-blue-500 rounded-xl text-white shadow-lg">
+                <h2 class="text-xl font-semibold opacity-80 mb-2">Locatie (Kolom P):</h2>
+                <div id="current-location" class="big-text">Laden...</div>
+            </div>
+
+            <div class="p-6 bg-gray-100 rounded-xl shadow-inner">
+                <h2 class="text-xl font-semibold text-gray-700 mb-2">Artikelnummer (Kolom S):</h2>
+                <div id="current-article" class="text-3xl font-mono text-gray-900">Laden...</div>
+            </div>
+
+            <!-- Invoer en Bevestiging -->
+            <div class="space-y-4">
+                <label for="counted-amount" class="block text-xl font-semibold text-gray-800">Geteld aantal (Kolom V)</label>
+                <input type="number" id="counted-amount" class="count-input w-full p-4 border-4 border-blue-300 focus:border-blue-500 rounded-lg outline-none transition duration-200" placeholder="Voer geteld aantal in" pattern="\d*" inputmode="numeric">
+                <button onclick="submitCount()" id="submit-button" class="w-full py-4 bg-blue-500 hover:bg-blue-600 text-white font-bold text-xl rounded-lg shadow-xl transition duration-150 transform hover:scale-[1.01]">
+                    Bevestig Telling
+                </button>
+                <p id="error-message" class="text-red-500 text-sm h-4"></p>
+            </div>
+
+        </div>
+
+        <!-- Voltooiing en Downloadgebied (standaard verborgen) -->
+        <div id="finish-area" class="hidden text-center p-10 bg-green-100 rounded-xl">
+            <h2 class="text-3xl font-bold text-green-700 mb-4">Tellen Voltooid!</h2>
+            <p class="text-gray-700 mb-6">Alle items zijn geteld. Download het bijgewerkte CSV-bestand.</p>
+            <button onclick="downloadCSV()" class="py-3 px-8 bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-lg shadow-lg transition duration-150">
+                Download Bijgewerkte CSV
+            </button>
+            <button onclick="window.location.reload()" class="ml-4 py-3 px-8 bg-gray-400 hover:bg-gray-500 text-white font-bold rounded-lg shadow-lg transition duration-150">
+                Begin Opnieuw
+            </button>
+        </div>
+
+    </div>
+
+    <script>
+        // Globale variabelen
+        let inventoryData = [];
+        let currentIndex = 0;
+        let headers = [];
+        let isDataLoaded = false;
+        let currentDelimiter = ','; // Standaard scheidingsteken
+
+        // Kolom Indices (0-gebaseerd)
+        // Kolom P (Locatie) is index 15
+        const COL_LOCATION = 15;
+        // Kolom S (Artikel) is index 18
+        const COL_ARTICLE = 18;
+        // Kolom V (Getelde voorraad) is index 21 - dit is de kolom die we updaten
+        const COL_COUNTED_STOCK = 21;
+
+        const ui = {
+            status: document.getElementById('status-message'),
+            loadArea: document.getElementById('load-area'),
+            countInterface: document.getElementById('count-interface'),
+            finishArea: document.getElementById('finish-area'),
+            currentLocation: document.getElementById('current-location'),
+            currentArticle: document.getElementById('current-article'),
+            countedAmount: document.getElementById('counted-amount'),
+            errorMessage: document.getElementById('error-message'),
+            submitButton: document.getElementById('submit-button')
         };
-        stream = await navigator.mediaDevices.getUserMedia(constraints);
-        const videoElem = document.getElementById("preview");
-        videoElem.srcObject = stream;
-        await videoElem.play();
-        status("Camera gestart");
-        return videoElem;
-    } catch (err) {
-        console.error(err);
-        status("Fout bij starten camera: " + err.message);
-    }
-}
 
-async function startScan() {
-    if (scanning) {
-        status("Flow draait al");
-        return;
-    }
-    scanning = true;
-    const videoElem = await startCamera();
-    if (!videoElem) return;
+        // --- CSV HULPFUNCTIES ---
 
-    reader = new ZXing.BrowserMultiFormatReader();
+        /**
+         * Bepaalt het scheidingsteken (delimiter) op basis van de eerste datarij.
+         * @param {string} headerLine De header regel
+         * @returns {string} Het gedetecteerde scheidingsteken (',' of ';').
+         */
+        function detectDelimiter(headerLine) {
+            if (headerLine.includes(';')) {
+                return ';';
+            }
+            // Standaard is de komma (en dit is ook de fallback)
+            return ','; 
+        }
 
-    const loopScan = async () => {
-        if (!scanning) return;
-        try {
-            const result = await reader.decodeOnceFromVideoElement(videoElem);
-            if (result && result.text) {
-                status("Scan gedetecteerd: " + result.text);
+        /**
+         * Simpele CSV-parser.
+         * Negeert de eerste regel (headers)
+         * @param {string} csvText De ruwe CSV-tekst
+         * @returns {Array<Array<string>>} Een array van rijen, waarbij elke rij een array van cellen is.
+         */
+        function parseCSV(csvText) {
+            // Split op basis van newline, filter lege regels
+            const lines = csvText.split(/\r\n|\n/).filter(line => line.trim() !== '');
 
-                if (scanPhase === "locatie") {
-                    document.getElementById("locInput").value = result.text;
-                    scanPhase = "artikel";
-                    status("Scan artikel nu");
-                } else if (scanPhase === "artikel") {
-                    document.getElementById("artInput").value = result.text;
-                    scanPhase = "locatie";
-                    status("Voer aantal in en klik Opslaan");
+            if (lines.length === 0) return [];
+
+            // De eerste regel is de header
+            const headerLine = lines[0];
+            currentDelimiter = detectDelimiter(headerLine);
+            
+            // Parsen van headers
+            headers = headerLine.split(currentDelimiter).map(h => h.trim());
+
+            // De rest van de regels is de data
+            const dataLines = lines.slice(1);
+            
+            // Probeer de lijnen te splitsen met het gedetecteerde scheidingsteken
+            return dataLines.map(line => {
+                // Splits de lijn op het gedetecteerde scheidingsteken en verwijder witruimte
+                return line.split(currentDelimiter).map(cell => cell.trim().replace(/^"|"$/g, '')); // Verwijder quotes
+            });
+        }
+
+        /**
+         * Converteert de interne data array terug naar een CSV-string met het gedetecteerde scheidingsteken.
+         * @returns {string} De geüpdatete CSV-tekst.
+         */
+        function dataToCSV() {
+            const csvLines = [];
+            // Voeg eerst de headers toe
+            csvLines.push(headers.join(currentDelimiter));
+
+            // Voeg de data toe
+            inventoryData.forEach(row => {
+                // Cellen met scheidingstekens moeten tussen dubbele aanhalingstekens staan 
+                const safeRow = row.map(cell => {
+                    if (cell.includes(currentDelimiter) || cell.includes('"')) {
+                        // Quotes verdubbelen en omringen met quotes
+                        return `"${cell.replace(/"/g, '""')}"`;
+                    }
+                    return cell;
+                });
+                csvLines.push(safeRow.join(currentDelimiter));
+            });
+
+            return csvLines.join('\n');
+        }
+
+        // --- UI & DATA FUNCTIES ---
+
+        /**
+         * Rendert het huidige inventarisitem op de UI.
+         */
+        function renderItem() {
+            ui.errorMessage.textContent = '';
+            ui.countedAmount.value = '';
+            ui.countedAmount.focus();
+            
+            if (currentIndex >= inventoryData.length) {
+                // Alle items zijn geteld
+                ui.countInterface.classList.add('hidden');
+                ui.finishArea.classList.remove('hidden');
+                ui.loadArea.classList.add('hidden');
+                return;
+            }
+
+            const item = inventoryData[currentIndex];
+            
+            // Controleer of de indices binnen de grenzen van de rij liggen
+            const locationValue = item.length > COL_LOCATION ? item[COL_LOCATION] : 'FOUT: Index P ontbreekt';
+            const articleValue = item.length > COL_ARTICLE ? item[COL_ARTICLE] : 'FOUT: Index S ontbreekt';
+
+
+            ui.currentLocation.textContent = locationValue || 'LEEG'; // Toon 'LEEG' als de cel leeg is
+            ui.currentArticle.textContent = articleValue || 'LEEG';
+            
+            // LAAT HET GETELDE AANTAL LEEG VOOR "BLIND TELLEN"
+            ui.countedAmount.placeholder = 'Voer geteld aantal in'; // Altijd een generieke melding
+            
+            ui.status.textContent = `Bezig met item ${currentIndex + 1} van ${inventoryData.length} (Scheidingsteken: ${currentDelimiter})`;
+            
+            // Zorg ervoor dat de tel-interface zichtbaar is
+            ui.loadArea.classList.add('hidden');
+            ui.countInterface.classList.remove('hidden');
+            ui.finishArea.classList.add('hidden');
+        }
+
+        /**
+         * Verwerkt de telling en gaat naar het volgende item.
+         */
+        function submitCount() {
+            const countValue = ui.countedAmount.value.trim();
+
+            if (countValue === '' || isNaN(countValue)) {
+                ui.errorMessage.textContent = 'Voer een geldig getal in voor de telling.';
+                return;
+            }
+
+            const count = parseInt(countValue, 10);
+            
+            if (count < 0) {
+                 ui.errorMessage.textContent = 'Aantal kan niet negatief zijn.';
+                return;
+            }
+
+            // Update de data array op de correcte index (Kolom V)
+            const currentRow = inventoryData[currentIndex];
+            // Zorg ervoor dat de rij lang genoeg is om de waarde op te slaan
+            while (currentRow.length <= COL_COUNTED_STOCK) {
+                currentRow.push(''); 
+            }
+            currentRow[COL_COUNTED_STOCK] = count;
+            
+            // Ga naar het volgende item
+            currentIndex++;
+            renderItem();
+        }
+
+        /**
+         * Downloadt het bijgewerkte inventarisbestand als CSV.
+         */
+        function downloadCSV() {
+            if (inventoryData.length === 0) {
+                ui.status.textContent = 'Geen gegevens om te downloaden.'; 
+                return;
+            }
+
+            const csvContent = dataToCSV();
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            
+            // Maak een downloadlink aan
+            const url = URL.createObjectURL(blob);
+            link.setAttribute('href', url);
+            link.setAttribute('download', 'bijgewerkte_telling_' + new Date().toISOString().slice(0, 10) + '.csv');
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+
+            ui.status.textContent = 'CSV is gedownload.';
+        }
+
+        /**
+         * Laadt data vanuit een bestand.
+         */
+        function loadInitialData() {
+            const fileInput = document.getElementById('csvFileInput');
+            const file = fileInput.files[0];
+
+            if (!file) {
+                ui.status.textContent = 'Selecteer een CSV-bestand om te laden.';
+                return;
+            }
+
+            ui.status.textContent = 'Bezig met laden...';
+            const reader = new FileReader();
+
+            reader.onload = function(e) {
+                const csvText = e.target.result;
+                const parsedData = parseCSV(csvText);
+
+                if (parsedData.length === 0) {
+                    ui.status.textContent = 'Fout: Geen gegevens gevonden in het CSV-bestand.';
+                    isDataLoaded = false;
+                    return;
                 }
 
-                setTimeout(loopScan, 600);
-            } else {
-                setTimeout(loopScan, 600);
-            }
-        } catch (err) {
-            setTimeout(loopScan, 600);
+                inventoryData = parsedData;
+                currentIndex = 0;
+                isDataLoaded = true;
+                ui.status.textContent = `Succesvol ${inventoryData.length} items geladen. Start met tellen. (Scheidingsteken: ${currentDelimiter})`;
+                
+                // Roep renderItem direct aan na succesvol laden
+                renderItem(); 
+            };
+
+            reader.onerror = function() {
+                ui.status.textContent = 'Fout bij het lezen van het bestand.';
+            };
+
+            reader.readAsText(file);
         }
-    };
 
-    loopScan();
-}
+        // Event listener voor de Enter-toets op het invoerveld
+        ui.countedAmount.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                e.preventDefault(); // Voorkom standaard formuliergedrag
+                submitCount();
+            }
+        });
 
-function stopScan() {
-    scanning = false;
-    if (reader) reader.reset();
-    if (stream) stream.getTracks().forEach(t => t.stop());
-    status("Gestopt");
-}
+        // Initialisatie: Toon de status aan de gebruiker
+        document.addEventListener('DOMContentLoaded', () => {
+             ui.status.textContent = 'Selecteer het CSV-bestand en klik op "Laad CSV-bestand" om te beginnen.';
+        });
 
-document.getElementById("startBtn").onclick = startScan;
-document.getElementById("stopBtn").onclick = stopScan;
-
-document.getElementById("saveRowBtn").onclick = () => {
-    const loc = document.getElementById("locInput").value;
-    const art = document.getElementById("artInput").value;
-    const qty = document.getElementById("qtyInput").value;
-
-    if (!loc || !art || !qty) {
-        status("Vul locatie, artikel en aantal in");
-        return;
-    }
-
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-        <td>${rowIndex}</td>
-        <td>${new Date().toLocaleTimeString()}</td>
-        <td>${loc}</td>
-        <td>${art}</td>
-        <td>${qty}</td>
-        <td><button onclick="this.parentElement.parentElement.remove()">Verwijder</button></td>
-    `;
-    document.getElementById("rows").appendChild(tr);
-    rowIndex++;
-
-    document.getElementById("locInput").value = "";
-    document.getElementById("artInput").value = "";
-    document.getElementById("qtyInput").value = "";
-    document.getElementById("locInput").focus();
-
-    status("Regel opgeslagen");
-};
-
-// Export naar XLSX
-document.getElementById("exportXlsxBtn").onclick = () => {
-    const wb = XLSX.utils.book_new();
-    const wsData = [["#", "Tijd", "Locatie", "Artikel", "Aantal"]];
-    document.querySelectorAll("#rows tr").forEach(tr => {
-        wsData.push(Array.from(tr.children).slice(0,5).map(td => td.innerText));
-    });
-    const ws = XLSX.utils.aoa_to_sheet(wsData);
-    XLSX.utils.book_append_sheet(wb, ws, "Inventarisatie");
-    XLSX.writeFile(wb, "inventarisatie.xlsx");
-};
-</script>
+    </script>
+</body>
+</html>
