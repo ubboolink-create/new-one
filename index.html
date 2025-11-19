@@ -1,55 +1,11 @@
-<!DOCTYPE html>
-<html lang="nl">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Inventarisatie magazijn — Webapp</title>
-<style>
-    body { font-family: Arial, sans-serif; margin: 16px; }
-    button { padding: 10px 18px; margin: 6px; font-size: 16px; }
-    #preview { width: 100%; background: #000; border-radius: 8px; margin-top: 10px; }
-    .status { background: #eee; padding: 10px; margin-top: 10px; border-radius: 8px; }
-    table { width: 100%; margin-top: 20px; border-collapse: collapse; }
-    table, th, td { border: 1px solid #ccc; }
-    th, td { padding: 8px; }
-</style>
-</head>
-<body>
-<h2>Inventarisatie magazijn — Webapp</h2>
-<p>Korte workflow: <b>Scan locatie → Scan artikel → Voer aantal in → Opslaan → Volgende</b></p>
-
-<div>
-    <button id="startBtn">Start telrun</button>
-    <button id="stopBtn">Stop</button>
-    <button id="manualBtn">Handmatig toevoegen</button>
-    <button id="exportCsvBtn">Export .csv</button>
-    <button id="exportXlsxBtn">Export .xlsx</button>
-    <button id="clearBtn">Wis alle regels</button>
-</div>
-
-<div id="status" class="status">Status: klaar</div>
-
-<video id="preview" playsinline></video>
-
-<br />
-<label>Huidige locatie: <input id="locInput" /></label><br />
-<label>Huidig artikel: <input id="artInput" /></label><br />
-<label>Aantal: <input id="qtyInput" type="number" /></label>
-<button id="saveRowBtn">Opslaan regel</button>
-
-<table>
-<thead>
-<tr><th>#</th><th>Tijd</th><th>Locatie</th><th>Artikel</th><th>Aantal</th><th>Acties</th></tr>
-</thead>
-<tbody id="rows"></tbody>
-</table>
-
 <script src="https://unpkg.com/@zxing/library@latest/umd/index.min.js"></script>
+<script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
 <script>
 let stream = null;
 let reader = null;
 let scanning = false;
 let rowIndex = 1;
+let scanPhase = "locatie"; // "locatie" of "artikel"
 
 function status(msg) {
     document.getElementById("status").innerText = "Status: " + msg;
@@ -61,7 +17,6 @@ async function startCamera() {
             video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
             audio: false
         };
-
         stream = await navigator.mediaDevices.getUserMedia(constraints);
         const videoElem = document.getElementById("preview");
         videoElem.srcObject = stream;
@@ -80,7 +35,6 @@ async function startScan() {
         return;
     }
     scanning = true;
-
     const videoElem = await startCamera();
     if (!videoElem) return;
 
@@ -93,14 +47,18 @@ async function startScan() {
             if (result && result.text) {
                 status("Scan gedetecteerd: " + result.text);
 
-                // Toon scan in juiste veld afhankelijk van fase
-                const locField = document.getElementById("locInput");
-                const artField = document.getElementById("artInput");
+                if (scanPhase === "locatie") {
+                    document.getElementById("locInput").value = result.text;
+                    scanPhase = "artikel";
+                    status("Scan artikel nu");
+                } else if (scanPhase === "artikel") {
+                    document.getElementById("artInput").value = result.text;
+                    scanPhase = "locatie";
+                    status("Voer aantal in en klik Opslaan");
+                }
 
-                if (!locField.value) locField.value = result.text;
-                else if (!artField.value) artField.value = result.text;
-
-                // opnieuw scannen
+                setTimeout(loopScan, 600);
+            } else {
                 setTimeout(loopScan, 600);
             }
         } catch (err) {
@@ -146,10 +104,20 @@ document.getElementById("saveRowBtn").onclick = () => {
     document.getElementById("locInput").value = "";
     document.getElementById("artInput").value = "";
     document.getElementById("qtyInput").value = "";
+    document.getElementById("locInput").focus();
 
     status("Regel opgeslagen");
 };
-</script>
 
-</body>
-</html>
+// Export naar XLSX
+document.getElementById("exportXlsxBtn").onclick = () => {
+    const wb = XLSX.utils.book_new();
+    const wsData = [["#", "Tijd", "Locatie", "Artikel", "Aantal"]];
+    document.querySelectorAll("#rows tr").forEach(tr => {
+        wsData.push(Array.from(tr.children).slice(0,5).map(td => td.innerText));
+    });
+    const ws = XLSX.utils.aoa_to_sheet(wsData);
+    XLSX.utils.book_append_sheet(wb, ws, "Inventarisatie");
+    XLSX.writeFile(wb, "inventarisatie.xlsx");
+};
+</script>
