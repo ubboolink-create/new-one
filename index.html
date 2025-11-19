@@ -1,380 +1,155 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="nl">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Inventarisatie magazijn — Webapp (ZXing latest, fallback)</title>
-  <style>
-    :root{--accent:#0b74de}
-    body{
-      font-family: system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial;
-      max-width:980px;margin:18px auto;padding:12px;
-      -webkit-font-smoothing:antialiased;
-    }
-    h1{font-size:20px;margin-bottom:6px}
-    .controls{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;align-items:center}
-    button{
-      padding:8px 10px;border-radius:8px;border:1px solid #ccc;background:#f7f7f7;
-      touch-action: manipulation; -webkit-tap-highlight-color: rgba(0,0,0,0.08);
-      font-size:14px;
-    }
-    button.primary{background:var(--accent);color:white;border:none}
-    .topbar{position:relative; z-index:9999} /* topbar hoog plaatsen */
-    #videoWrap{position:relative; z-index:10; margin-top:10px; pointer-events:none; /* video/overlay vangen geen pointer */ }
-    #video{width:100%; max-width:480px; border-radius:8px; background:#000; display:block; pointer-events:none; touch-action:none;}
-    /* Veel scanner-libs voegen een canvas overlay toe; voorkom dat die events pakt */
-    #videoWrap canvas { position:absolute !important; top:0; left:0; pointer-events:none !important; }
-    .status{margin:8px 0;padding:8px;border-radius:6px;background:#f1f1f1}
-    table{width:100%;border-collapse:collapse;margin-top:12px}
-    th,td{border:1px solid #ddd;padding:6px;text-align:left}
-    input[type=number]{width:120px}
-    .row-actions{display:flex;gap:6px}
-    .banner{padding:10px;border-radius:8px;background:#fff3cd;border:1px solid #ffeeba;margin-bottom:10px}
-    @media(min-width:700px){body{padding:24px}}
-    .muted{color:#666;font-size:13px}
-  </style>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Inventarisatie magazijn — Webapp</title>
+<style>
+    body { font-family: Arial, sans-serif; margin: 16px; }
+    button { padding: 10px 18px; margin: 6px; font-size: 16px; }
+    #preview { width: 100%; background: #000; border-radius: 8px; margin-top: 10px; }
+    .status { background: #eee; padding: 10px; margin-top: 10px; border-radius: 8px; }
+    table { width: 100%; margin-top: 20px; border-collapse: collapse; }
+    table, th, td { border: 1px solid #ccc; }
+    th, td { padding: 8px; }
+</style>
 </head>
 <body>
-  <h1>Inventarisatie magazijn — Webapp</h1>
-  <p class="muted">Korte workflow: <strong>Scan locatie → Scan artikel → Voer aantal in → Opslaan → Volgende</strong></p>
+<h2>Inventarisatie magazijn — Webapp</h2>
+<p>Korte workflow: <b>Scan locatie → Scan artikel → Voer aantal in → Opslaan → Volgende</b></p>
 
-  <div class="topbar">
-    <div class="controls">
-      <button id="startFlow" class="primary">Start telrun</button>
-      <button id="stopFlow">Stop</button>
-      <button id="manualAdd">Handmatig toevoegen</button>
-      <button id="exportCsv">Export .csv</button>
-      <button id="exportXlsx">Export .xlsx</button>
-      <button id="clearAll">Wis alle regels</button>
-    </div>
-    <div class="status" id="status">Status: klaar</div>
-  </div>
+<div>
+    <button id="startBtn">Start telrun</button>
+    <button id="stopBtn">Stop</button>
+    <button id="manualBtn">Handmatig toevoegen</button>
+    <button id="exportCsvBtn">Export .csv</button>
+    <button id="exportXlsxBtn">Export .xlsx</button>
+    <button id="clearBtn">Wis alle regels</button>
+</div>
 
-  <div id="videoWrap" aria-hidden="true">
-    <video id="video" class="hidden" autoplay muted playsinline></video>
-  </div>
+<div id="status" class="status">Status: klaar</div>
 
-  <div style="margin-top:10px">
-    <label>Huidige locatie: <input id="curLocation" readonly /></label>
-    &nbsp;&nbsp;
-    <label>Huidig artikel: <input id="curArticle" readonly /></label>
-    &nbsp;&nbsp;
-    <label>Aantal: <input id="curCount" type="number" min="0" /></label>
-    &nbsp;&nbsp;
-    <button id="saveEntry">Opslaan regel</button>
-  </div>
+<video id="preview" playsinline></video>
 
-  <div class="banner" id="banner" style="display:none"></div>
+<br />
+<label>Huidige locatie: <input id="locInput" /></label><br />
+<label>Huidig artikel: <input id="artInput" /></label><br />
+<label>Aantal: <input id="qtyInput" type="number" /></label>
+<button id="saveRowBtn">Opslaan regel</button>
 
-  <table id="table" aria-live="polite">
-    <thead><tr><th>#</th><th>Tijd</th><th>Locatie</th><th>Artikel</th><th>Aantal</th><th>Acties</th></tr></thead>
-    <tbody></tbody>
-  </table>
+<table>
+<thead>
+<tr><th>#</th><th>Tijd</th><th>Locatie</th><th>Artikel</th><th>Aantal</th><th>Acties</th></tr>
+</thead>
+<tbody id="rows"></tbody>
+</table>
 
-  <!-- Debug/test image: lokaal pad uit sessie (de hosting / tooling kan dit path naar een URL transformeren) -->
-  <img id="debugScreenshot" src="/mnt/data/864c107b-72b5-449b-849d-8e9961590497.png" alt="debug" style="display:none" />
+<script src="https://unpkg.com/@zxing/library@latest/umd/index.min.js"></script>
+<script>
+let stream = null;
+let reader = null;
+let scanning = false;
+let rowIndex = 1;
 
-  <script>
-    // dynamic loader
-    function loadScript(src){
-      return new Promise((resolve,reject)=>{
-        if(document.querySelector('script[src="'+src+'"]')) return resolve();
-        const s = document.createElement('script'); s.src = src; s.onload = resolve; s.onerror = ()=>reject(new Error('Kon script niet laden: '+src)); document.head.appendChild(s);
-      });
-    }
-  </script>
+function status(msg) {
+    document.getElementById("status").innerText = "Status: " + msg;
+}
 
-  <script>
-    // Use the latest ZXing UMD from unpkg
-    const ZXING_UMD = 'https://unpkg.com/@zxing/library@latest/umd/index.min.js';
-
-    let ZXingLoaded = false;
-    let XLSXLoaded = false;
-    let codeReader = null;
-    let currentDeviceId = null;
-
-    const videoElem = document.getElementById('video');
-    const status = document.getElementById('status');
-    const banner = document.getElementById('banner');
-    const startFlowBtn = document.getElementById('startFlow');
-    const stopFlowBtn = document.getElementById('stopFlow');
-    const manualAddBtn = document.getElementById('manualAdd');
-    const exportCsvBtn = document.getElementById('exportCsv');
-    const exportXlsxBtn = document.getElementById('exportXlsx');
-    const clearAllBtn = document.getElementById('clearAll');
-    const saveEntryBtn = document.getElementById('saveEntry');
-
-    const curLocation = document.getElementById('curLocation');
-    const curArticle = document.getElementById('curArticle');
-    const curCount = document.getElementById('curCount');
-    const tableBody = document.querySelector('#table tbody');
-
-    let entries = [];
-    let flowRunning = false;
-    let step = 'idle'; // idle -> scan-location -> scan-article -> enter-count
-    let lastScanAt = 0;
-    let lastScannedValue = null;
-
-    function setStatus(txt){ status.textContent = 'Status: ' + txt; }
-    function showBanner(txt){ banner.style.display='block'; banner.textContent = txt; }
-    function hideBanner(){ banner.style.display='none'; banner.textContent=''; }
-
-    function addEntry(location, article, count){
-      const ts = new Date().toISOString();
-      entries.push({ts, location, article, count});
-      renderTable();
-    }
-    function renderTable(){
-      tableBody.innerHTML = '';
-      entries.forEach((e,i)=>{
-        const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${i+1}</td><td>${e.ts}</td><td>${e.location}</td><td>${e.article}</td><td>${e.count}</td>
-          <td class="row-actions"><button data-i='${i}' class='edit'>Wijzig</button><button data-i='${i}' class='del'>Verwijder</button></td>`;
-        tableBody.appendChild(tr);
-      });
-      document.querySelectorAll('.del').forEach(b=>b.onclick = ()=>{ entries.splice(+b.dataset.i,1); renderTable(); });
-      document.querySelectorAll('.edit').forEach(b=>{
-        b.onclick = ()=>{
-          const idx = +b.dataset.i;
-          curLocation.value = entries[idx].location;
-          curArticle.value = entries[idx].article;
-          curCount.value = entries[idx].count;
-          entries.splice(idx,1);
-          renderTable();
-          setStatus('Bewerk regel - bewaar opnieuw');
-          step = 'idle';
+async function startCamera() {
+    try {
+        const constraints = {
+            video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+            audio: false
         };
-      });
-    }
 
-    // robust camera enumeration helper
-    async function getCameras(){
-      // If ZXing provides a helper for the loaded build, use it (different builds expose different classes)
-      try{
-        if(window.ZXing){
-          // prefer BrowserMultiFormatReader.listVideoInputDevices if present
-          if(typeof ZXing.BrowserMultiFormatReader?.listVideoInputDevices === 'function'){
-            return await ZXing.BrowserMultiFormatReader.listVideoInputDevices();
-          }
-          if(typeof ZXing.BrowserCodeReader?.listVideoInputDevices === 'function'){
-            return await ZXing.BrowserCodeReader.listVideoInputDevices();
-          }
-          if(typeof ZXing.BrowserMultiFormatContinuousReader?.listVideoInputDevices === 'function'){
-            return await ZXing.BrowserMultiFormatContinuousReader.listVideoInputDevices();
-          }
-        }
-      }catch(e){
-        console.warn('ZXing listVideoInputDevices helper failed:', e);
-      }
-
-      // Fallback: use standard enumerateDevices
-      if(navigator.mediaDevices && typeof navigator.mediaDevices.enumerateDevices === 'function'){
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        return devices.filter(d => d.kind === 'videoinput').map(d => ({deviceId: d.deviceId, label: d.label || 'camera'}));
-      }
-      return [];
-    }
-
-    // Debounce + duplicate-filter logic
-    function handleScan(text){
-      const now = Date.now();
-      if(now - lastScanAt < 700) return;
-      lastScanAt = now;
-      if(lastScannedValue === text) return;
-      lastScannedValue = text;
-      setTimeout(()=>{ lastScannedValue = null; }, 1200);
-
-      if(!flowRunning) return;
-      if(step === 'scan-location'){
-        curLocation.value = text;
-        setStatus('Locatie gescand: ' + text + ' — nu artikel scannen');
-        step = 'scan-article';
-        if(navigator.vibrate) navigator.vibrate(80);
-      } else if(step === 'scan-article'){
-        curArticle.value = text;
-        setStatus('Artikel gescand: ' + text + ' — vul aantal in');
-        step = 'enter-count';
-        if(navigator.vibrate) navigator.vibrate(80);
-        setTimeout(()=>{ try{ curCount.focus(); }catch(e){} }, 200);
-      } else {
-        console.log('Scan ontvangen in stap', step, '->', text);
-      }
-    }
-
-    async function startCamera(){
-      try{
-        if(!ZXingLoaded){
-          setStatus('ZXing library laden...');
-          await loadScript(ZXING_UMD);
-          ZXingLoaded = true;
-        }
-
-        // Choose best available reader
-        if(!codeReader){
-          if(window.ZXing){
-            if(typeof ZXing.BrowserMultiFormatContinuousReader === 'function'){
-              codeReader = new ZXing.BrowserMultiFormatContinuousReader();
-            }else if(typeof ZXing.BrowserMultiFormatReader === 'function'){
-              codeReader = new ZXing.BrowserMultiFormatReader();
-            }else if(typeof ZXing.BrowserCodeReader === 'function'){
-              codeReader = new ZXing.BrowserCodeReader();
-            }else{
-              throw new Error('Geen compatibele ZXing reader beschikbaar');
-            }
-          }else{
-            throw new Error('ZXing library niet gevonden na laden');
-          }
-        }
-
-        const devices = await getCameras();
-        if(!devices || devices.length === 0){
-          setStatus('Geen camera gevonden op dit apparaat');
-          showBanner('Geen geschikte camera gevonden. Gebruik een andere device of handscanner.');
-          return;
-        }
-
-        // pick back/rear camera if possible
-        let deviceId = devices.find(d=>/back|rear|environment/gi.test(d.label || ''))?.deviceId || devices[0].deviceId;
-        currentDeviceId = deviceId;
-
-        // Show video (but keep pointer-events disabled so buttons remain accessible)
-        videoElem.classList.remove('hidden');
-        videoElem.style.pointerEvents = 'none';
-
-        // If codeReader has continuous decode API, use it
-        if(typeof codeReader.decodeFromVideoDevice === 'function'){
-          await codeReader.decodeFromVideoDevice(deviceId, videoElem, (result, err) => {
-            if(result){
-              try{ handleScan(result.getText()); }catch(e){ console.error(e); }
-            } else if(err && !(err instanceof ZXing.NotFoundException)){
-              // ZXing NotFoundException is common for continuous mode when no code in frame
-              console.warn('scan error', err);
-            }
-          });
-        } else {
-          // fallback: attach stream and attempt decoding periodically (best-effort)
-          const stream = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: deviceId } } });
-          videoElem.srcObject = stream;
-          videoElem.play().catch(()=>{});
-          // If ZXing has decodeBitmap or similar, we could attempt manual decoding; skipping heavy fallback for now
-        }
-
-        setStatus('Camera gestart — klaar om te scannen');
-        hideBanner();
-      }catch(err){
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+        const videoElem = document.getElementById("preview");
+        videoElem.srcObject = stream;
+        await videoElem.play();
+        status("Camera gestart");
+        return videoElem;
+    } catch (err) {
         console.error(err);
-        setStatus('Fout bij starten camera: ' + (err && err.message ? err.message : String(err)));
-        showBanner('Fout bij starten camera: ' + ((err && err.message) || String(err)));
-      }
+        status("Fout bij starten camera: " + err.message);
     }
+}
 
-    function stopCamera(){
-      try{
-        if(codeReader && typeof codeReader.reset === 'function') codeReader.reset();
-      }catch(e){ console.warn(e); }
-      try{
-        const s = videoElem && videoElem.srcObject;
-        if(s && s.getTracks) s.getTracks().forEach(t=>{ try{ t.stop(); }catch(e){} });
-      }catch(e){}
-      try{ videoElem.srcObject = null; }catch(e){}
-      videoElem.classList.add('hidden');
-      setStatus('Camera gestopt');
-    }
-
-    async function doStartFlow(){
-      if(flowRunning){ setStatus('Flow draait al'); return; }
-      // ask for permission first to provide better UX on some Android/Chrome variants
-      try{
-        setStatus('Vraagt camera-toestemming...');
-        await navigator.mediaDevices.getUserMedia({video:true});
-      }catch(e){
-        setStatus('Camera-toestemming geweigerd of niet beschikbaar');
-        showBanner('Toestemming camera geweigerd. Geef camera-toegang in browserinstellingen en herlaad de pagina.');
+async function startScan() {
+    if (scanning) {
+        status("Flow draait al");
         return;
-      }
+    }
+    scanning = true;
 
-      flowRunning = true;
-      step = 'scan-location';
-      curLocation.value = '';
-      curArticle.value = '';
-      curCount.value = '';
-      await startCamera();
-      setStatus('Start telrun — scan eerst de locatie');
+    const videoElem = await startCamera();
+    if (!videoElem) return;
+
+    reader = new ZXing.BrowserMultiFormatReader();
+
+    const loopScan = async () => {
+        if (!scanning) return;
+        try {
+            const result = await reader.decodeOnceFromVideoElement(videoElem);
+            if (result && result.text) {
+                status("Scan gedetecteerd: " + result.text);
+
+                // Toon scan in juiste veld afhankelijk van fase
+                const locField = document.getElementById("locInput");
+                const artField = document.getElementById("artInput");
+
+                if (!locField.value) locField.value = result.text;
+                else if (!artField.value) artField.value = result.text;
+
+                // opnieuw scannen
+                setTimeout(loopScan, 600);
+            }
+        } catch (err) {
+            setTimeout(loopScan, 600);
+        }
+    };
+
+    loopScan();
+}
+
+function stopScan() {
+    scanning = false;
+    if (reader) reader.reset();
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    status("Gestopt");
+}
+
+document.getElementById("startBtn").onclick = startScan;
+document.getElementById("stopBtn").onclick = stopScan;
+
+document.getElementById("saveRowBtn").onclick = () => {
+    const loc = document.getElementById("locInput").value;
+    const art = document.getElementById("artInput").value;
+    const qty = document.getElementById("qtyInput").value;
+
+    if (!loc || !art || !qty) {
+        status("Vul locatie, artikel en aantal in");
+        return;
     }
 
-    startFlowBtn.addEventListener('click', doStartFlow); // only click to avoid touchstart/preventDefault issues
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+        <td>${rowIndex}</td>
+        <td>${new Date().toLocaleTimeString()}</td>
+        <td>${loc}</td>
+        <td>${art}</td>
+        <td>${qty}</td>
+        <td><button onclick="this.parentElement.parentElement.remove()">Verwijder</button></td>
+    `;
+    document.getElementById("rows").appendChild(tr);
+    rowIndex++;
 
-    stopFlowBtn.onclick = ()=>{
-      flowRunning = false;
-      step='idle';
-      stopCamera();
-      setStatus('Flow gestopt');
-    };
+    document.getElementById("locInput").value = "";
+    document.getElementById("artInput").value = "";
+    document.getElementById("qtyInput").value = "";
 
-    saveEntryBtn.onclick = ()=>{
-      const location = curLocation.value.trim();
-      const article = curArticle.value.trim();
-      const count = curCount.value.trim();
-      if(!location || !article || count===''){
-        alert('Vul locatie, artikel en aantal in (kan gescand of handmatig)'); return;
-      }
-      addEntry(location, article, count);
-      curLocation.value=''; curArticle.value=''; curCount.value='';
-      setStatus('Regel opgeslagen — scan volgende locatie');
-      step = 'scan-location';
-    };
+    status("Regel opgeslagen");
+};
+</script>
 
-    manualAddBtn.onclick = ()=>{
-      flowRunning = false;
-      step='idle';
-      stopCamera();
-      setStatus('Handmatige invoer - vul velden en klik Opslaan');
-    };
-
-    exportCsvBtn.onclick = ()=>{
-      if(entries.length===0){ alert('Geen regels om te exporteren'); return; }
-      const header = ['Tijdstempel','Locatiecode','Artikelnummer','Aantal'];
-      const csv = [header.join(',')].concat(entries.map(e=>[e.ts,e.location,e.article,e.count].map(csvSafe).join(','))).join('\n');
-      downloadBlob(csv, 'inventarisatie.csv', 'text/csv;charset=utf-8;');
-    };
-
-    exportXlsxBtn.onclick = async ()=>{
-      if(entries.length===0){ alert('Geen regels om te exporteren'); return; }
-      if(!XLSXLoaded){
-        try{ await loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js'); XLSXLoaded = true; }catch(e){ alert('Kon Sheet export library niet laden — gebruik CSV als alternatief'); return; }
-      }
-      const ws_data = [['Tijdstempel','Locatiecode','Artikelnummer','Aantal']].concat(entries.map(e=>[e.ts,e.location,e.article,e.count]));
-      const wb = XLSX.utils.book_new();
-      const ws = XLSX.utils.aoa_to_sheet(ws_data);
-      XLSX.utils.book_append_sheet(wb, ws, 'Inventarisatie');
-      const wbout = XLSX.write(wb, {bookType:'xlsx', type:'array'});
-      const blob = new Blob([wbout],{type:'application/octet-stream'});
-      downloadBlob(blob, 'inventarisatie.xlsx');
-    };
-
-    clearAllBtn.onclick = ()=>{ if(confirm('Weet je het zeker? Alle regels wissen.')){ entries=[]; renderTable(); } };
-
-    function csvSafe(s){
-      if(s==null) return '';
-      const t = String(s).replace(/"/g,'""');
-      if(t.indexOf(',')>=0 || t.indexOf('\n')>=0) return '"'+t+'"';
-      return t;
-    }
-    function downloadBlob(data, filename, mime){
-      const blob = data instanceof Blob ? data : new Blob([data],{type:mime||'text/plain'});
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
-    }
-
-    window.addEventListener('beforeunload', ()=>{
-      try{ if(codeReader && typeof codeReader.reset === 'function') codeReader.reset(); }catch(e){}
-      try{
-        const s = videoElem && videoElem.srcObject;
-        if(s && s.getTracks) s.getTracks().forEach(t=>{ try{ t.stop(); }catch(e){} });
-      }catch(e){}
-    });
-
-    console.log('Webapp geladen. Klik "Start telrun" om te beginnen (geef camera toegang).');
-  </script>
 </body>
 </html>
