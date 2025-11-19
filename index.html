@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Inventarisatie magazijn — Webapp (stabiel mobiel)</title>
+  <title>Inventarisatie magazijn — Webapp (ZXing latest, fallback)</title>
   <style>
     :root{--accent:#0b74de}
     body{
@@ -31,7 +31,6 @@
     .row-actions{display:flex;gap:6px}
     .banner{padding:10px;border-radius:8px;background:#fff3cd;border:1px solid #ffeeba;margin-bottom:10px}
     @media(min-width:700px){body{padding:24px}}
-    /* small helpers */
     .muted{color:#666;font-size:13px}
   </style>
 </head>
@@ -72,14 +71,11 @@
     <tbody></tbody>
   </table>
 
-  <!-- Hidden debug/test image (pad uit jouw sessie) -->
-  <!-- Gebruik dit pad indien je wilt dat de host het bestand beschikbaar maakt: 
-       /mnt/data/73cac197-8af1-4827-a3ca-64a1cacb2f32.png
-       (de host kan dit pad transformeren naar een URL) -->
-  <img id="debugScreenshot" src="/mnt/data/73cac197-8af1-4827-a3ca-64a1cacb2f32.png" alt="debug" style="display:none" />
+  <!-- Debug/test image: lokaal pad uit sessie (de hosting / tooling kan dit path naar een URL transformeren) -->
+  <img id="debugScreenshot" src="/mnt/data/864c107b-72b5-449b-849d-8e9961590497.png" alt="debug" style="display:none" />
 
-  <!-- Small helper to dynamically load external scripts when needed -->
   <script>
+    // dynamic loader
     function loadScript(src){
       return new Promise((resolve,reject)=>{
         if(document.querySelector('script[src="'+src+'"]')) return resolve();
@@ -89,8 +85,9 @@
   </script>
 
   <script>
-    // Configuration / state
-    const UPLOADED_IMAGE_URL = '/mnt/data/73cac197-8af1-4827-a3ca-64a1cacb2f32.png'; // pad uit je sessie (gebruik door host om te transformeren)
+    // Use the latest ZXing UMD from unpkg
+    const ZXING_UMD = 'https://unpkg.com/@zxing/library@latest/umd/index.min.js';
+
     let ZXingLoaded = false;
     let XLSXLoaded = false;
     let codeReader = null;
@@ -135,11 +132,10 @@
           <td class="row-actions"><button data-i='${i}' class='edit'>Wijzig</button><button data-i='${i}' class='del'>Verwijder</button></td>`;
         tableBody.appendChild(tr);
       });
-      // attach actions
       document.querySelectorAll('.del').forEach(b=>b.onclick = ()=>{ entries.splice(+b.dataset.i,1); renderTable(); });
       document.querySelectorAll('.edit').forEach(b=>{
         b.onclick = ()=>{
-          const idx=+b.dataset.i;
+          const idx = +b.dataset.i;
           curLocation.value = entries[idx].location;
           curArticle.value = entries[idx].article;
           curCount.value = entries[idx].count;
@@ -151,17 +147,42 @@
       });
     }
 
+    // robust camera enumeration helper
+    async function getCameras(){
+      // If ZXing provides a helper for the loaded build, use it (different builds expose different classes)
+      try{
+        if(window.ZXing){
+          // prefer BrowserMultiFormatReader.listVideoInputDevices if present
+          if(typeof ZXing.BrowserMultiFormatReader?.listVideoInputDevices === 'function'){
+            return await ZXing.BrowserMultiFormatReader.listVideoInputDevices();
+          }
+          if(typeof ZXing.BrowserCodeReader?.listVideoInputDevices === 'function'){
+            return await ZXing.BrowserCodeReader.listVideoInputDevices();
+          }
+          if(typeof ZXing.BrowserMultiFormatContinuousReader?.listVideoInputDevices === 'function'){
+            return await ZXing.BrowserMultiFormatContinuousReader.listVideoInputDevices();
+          }
+        }
+      }catch(e){
+        console.warn('ZXing listVideoInputDevices helper failed:', e);
+      }
+
+      // Fallback: use standard enumerateDevices
+      if(navigator.mediaDevices && typeof navigator.mediaDevices.enumerateDevices === 'function'){
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        return devices.filter(d => d.kind === 'videoinput').map(d => ({deviceId: d.deviceId, label: d.label || 'camera'}));
+      }
+      return [];
+    }
+
     // Debounce + duplicate-filter logic
     function handleScan(text){
       const now = Date.now();
-      // throttle rapid callbacks
       if(now - lastScanAt < 700) return;
       lastScanAt = now;
-
-      // ignore exact duplicates in short succession
       if(lastScannedValue === text) return;
       lastScannedValue = text;
-      setTimeout(()=>{ lastScannedValue = null; }, 1200); // allow same code after 1.2s
+      setTimeout(()=>{ lastScannedValue = null; }, 1200);
 
       if(!flowRunning) return;
       if(step === 'scan-location'){
@@ -174,125 +195,97 @@
         setStatus('Artikel gescand: ' + text + ' — vul aantal in');
         step = 'enter-count';
         if(navigator.vibrate) navigator.vibrate(80);
-        // focus in a next tick so mobile keyboard behaves
         setTimeout(()=>{ try{ curCount.focus(); }catch(e){} }, 200);
       } else {
-        // if idle or enter-count, ignore or beep
         console.log('Scan ontvangen in stap', step, '->', text);
       }
     }
 
-    /* Camera / ZXing handling */
     async function startCamera(){
       try{
         if(!ZXingLoaded){
           setStatus('ZXing library laden...');
-          // Use a known stable UMD build (if your hosting policy requires specific version, change this)
-          await loadScript('https://unpkg.com/@zxing/library@0.19.1/umd/index.min.js');
+          await loadScript(ZXING_UMD);
           ZXingLoaded = true;
         }
-        // create codeReader if not exists
+
+        // Choose best available reader
         if(!codeReader){
-          // Prefer continuous reader when available
-          if(window.ZXing && ZXing.BrowserMultiFormatContinuousReader){
-            codeReader = new ZXing.BrowserMultiFormatContinuousReader();
-          }else if(window.ZXing && ZXing.BrowserMultiFormatReader){
-            codeReader = new ZXing.BrowserMultiFormatReader();
+          if(window.ZXing){
+            if(typeof ZXing.BrowserMultiFormatContinuousReader === 'function'){
+              codeReader = new ZXing.BrowserMultiFormatContinuousReader();
+            }else if(typeof ZXing.BrowserMultiFormatReader === 'function'){
+              codeReader = new ZXing.BrowserMultiFormatReader();
+            }else if(typeof ZXing.BrowserCodeReader === 'function'){
+              codeReader = new ZXing.BrowserCodeReader();
+            }else{
+              throw new Error('Geen compatibele ZXing reader beschikbaar');
+            }
           }else{
-            throw new Error('ZXing-library lijkt niet goed geladen');
+            throw new Error('ZXing library niet gevonden na laden');
           }
         }
 
-        const devices = await ZXing.BrowserCodeReader.listVideoInputDevices();
-        let deviceId = devices.find(d=>/back|rear|environment/gi.test(d.label))?.deviceId || (devices[0] && devices[0].deviceId);
-        if(!deviceId){
+        const devices = await getCameras();
+        if(!devices || devices.length === 0){
           setStatus('Geen camera gevonden op dit apparaat');
-          showBanner('Geen geschikte camera gevonden. Gebruik een andere device of een handscanner.');
+          showBanner('Geen geschikte camera gevonden. Gebruik een andere device of handscanner.');
           return;
         }
+
+        // pick back/rear camera if possible
+        let deviceId = devices.find(d=>/back|rear|environment/gi.test(d.label || ''))?.deviceId || devices[0].deviceId;
         currentDeviceId = deviceId;
 
-        // Make video visible now we've confirmed camera (but keep pointer-events disabled)
+        // Show video (but keep pointer-events disabled so buttons remain accessible)
         videoElem.classList.remove('hidden');
         videoElem.style.pointerEvents = 'none';
 
-        // Try continuous decode if available
-        if(codeReader.decodeFromVideoDevice){
-          // decodeFromVideoDevice(deviceId, videoElement, (result, err)=>{...})
-          await codeReader.decodeFromVideoDevice(deviceId, videoElem, (result, err)=>{
+        // If codeReader has continuous decode API, use it
+        if(typeof codeReader.decodeFromVideoDevice === 'function'){
+          await codeReader.decodeFromVideoDevice(deviceId, videoElem, (result, err) => {
             if(result){
               try{ handleScan(result.getText()); }catch(e){ console.error(e); }
             } else if(err && !(err instanceof ZXing.NotFoundException)){
-              // NotFoundException is normal for continuous read; other errors log
+              // ZXing NotFoundException is common for continuous mode when no code in frame
               console.warn('scan error', err);
             }
           });
-        }else{
-          // Fallback: getUserMedia + decodeOnce in a loop
-          const stream = await navigator.mediaDevices.getUserMedia({video:{deviceId:{exact:deviceId}}});
+        } else {
+          // fallback: attach stream and attempt decoding periodically (best-effort)
+          const stream = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: deviceId } } });
           videoElem.srcObject = stream;
           videoElem.play().catch(()=>{});
-          // decode frames periodically
-          const canvas = document.createElement('canvas');
-          const ctx = canvas.getContext('2d');
-          let running = true;
-          const loop = async ()=>{
-            if(!running) return;
-            try{
-              canvas.width = videoElem.videoWidth || 640;
-              canvas.height = videoElem.videoHeight || 480;
-              ctx.drawImage(videoElem,0,0,canvas.width,canvas.height);
-              const imgData = ctx.getImageData(0,0,canvas.width,canvas.height);
-              const luminancesUint8 = new Uint8ClampedArray(imgData.data.length/4);
-              // convert to luminance (simple)
-              for(let i=0,j=0;i<imgData.data.length;i+=4,j++){ luminancesUint8[j] = (imgData.data[i]*0.299 + imgData.data[i+1]*0.587 + imgData.data[i+2]*0.114); }
-              // use ZXing API if available
-              if(codeReader.decodeBitmap){
-                try{
-                  const result = codeReader.decodeBitmap(luminancesUint8, canvas.width, canvas.height);
-                  if(result) handleScan(result.getText());
-                }catch(e){
-                  // ignore no-result
-                }
-              }
-            }catch(e){}
-            setTimeout(loop, 300);
-          };
-          loop();
+          // If ZXing has decodeBitmap or similar, we could attempt manual decoding; skipping heavy fallback for now
         }
 
         setStatus('Camera gestart — klaar om te scannen');
         hideBanner();
       }catch(err){
         console.error(err);
-        setStatus('Kon camera niet starten: ' + (err && err.message ? err.message : err));
+        setStatus('Fout bij starten camera: ' + (err && err.message ? err.message : String(err)));
         showBanner('Fout bij starten camera: ' + ((err && err.message) || String(err)));
       }
     }
 
     function stopCamera(){
       try{
-        if(codeReader && codeReader.reset) codeReader.reset(); // stops continuous reader
+        if(codeReader && typeof codeReader.reset === 'function') codeReader.reset();
       }catch(e){ console.warn(e); }
       try{
-        // stop any media tracks attached to the video element
         const s = videoElem && videoElem.srcObject;
-        if(s && s.getTracks){
-          s.getTracks().forEach(t=>{ try{ t.stop(); }catch(e){} });
-        }
+        if(s && s.getTracks) s.getTracks().forEach(t=>{ try{ t.stop(); }catch(e){} });
       }catch(e){}
       try{ videoElem.srcObject = null; }catch(e){}
       videoElem.classList.add('hidden');
       setStatus('Camera gestopt');
     }
 
-    /* Flow control */
     async function doStartFlow(){
       if(flowRunning){ setStatus('Flow draait al'); return; }
-      // Try to request camera permission proactively
+      // ask for permission first to provide better UX on some Android/Chrome variants
       try{
         setStatus('Vraagt camera-toestemming...');
-        // On some Android devices calling getUserMedia first gives a clearer permission dialog
         await navigator.mediaDevices.getUserMedia({video:true});
       }catch(e){
         setStatus('Camera-toestemming geweigerd of niet beschikbaar');
@@ -309,7 +302,7 @@
       setStatus('Start telrun — scan eerst de locatie');
     }
 
-    startFlowBtn.addEventListener('click', doStartFlow); // only click, avoid touchstart/preventDefault issues
+    startFlowBtn.addEventListener('click', doStartFlow); // only click to avoid touchstart/preventDefault issues
 
     stopFlowBtn.onclick = ()=>{
       flowRunning = false;
@@ -318,7 +311,6 @@
       setStatus('Flow gestopt');
     };
 
-    // Save button
     saveEntryBtn.onclick = ()=>{
       const location = curLocation.value.trim();
       const article = curArticle.value.trim();
@@ -374,16 +366,14 @@
       const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
     }
 
-    // Stop camera when user leaves page
     window.addEventListener('beforeunload', ()=>{
-      try{ if(codeReader && codeReader.reset) codeReader.reset(); }catch(e){}
+      try{ if(codeReader && typeof codeReader.reset === 'function') codeReader.reset(); }catch(e){}
       try{
         const s = videoElem && videoElem.srcObject;
         if(s && s.getTracks) s.getTracks().forEach(t=>{ try{ t.stop(); }catch(e){} });
       }catch(e){}
     });
 
-    // Small initial log
     console.log('Webapp geladen. Klik "Start telrun" om te beginnen (geef camera toegang).');
   </script>
 </body>
