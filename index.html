@@ -3,21 +3,27 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Inventarisatie magazijn — Webapp</title>
+  <title>Inventarisatie magazijn — Webapp (stabiel mobiel)</title>
   <style>
-    /* Layout fixes to make the Start-knop altijd klikbaar boven de video */
     :root{--accent:#0b74de}
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial;max-width:980px;margin:18px auto;padding:12px}
+    body{
+      font-family: system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial;
+      max-width:980px;margin:18px auto;padding:12px;
+      -webkit-font-smoothing:antialiased;
+    }
     h1{font-size:20px;margin-bottom:6px}
     .controls{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;align-items:center}
-    button{padding:8px 10px;border-radius:8px;border:1px solid #ccc;background:#f7f7f7}
+    button{
+      padding:8px 10px;border-radius:8px;border:1px solid #ccc;background:#f7f7f7;
+      touch-action: manipulation; -webkit-tap-highlight-color: rgba(0,0,0,0.08);
+      font-size:14px;
+    }
     button.primary{background:var(--accent);color:white;border:none}
-    /* Ensure controls are above video and always receive touch events */
-    .topbar{position:relative;z-index:40}
-    #videoWrap{position:relative;margin-top:10px}
-    #video{width:100%;max-width:480px;border-radius:8px;background:#000;display:block}
-    /* Hide video until Start wordt geklikt */
-    #video.hidden{display:none}
+    .topbar{position:relative; z-index:9999} /* topbar hoog plaatsen */
+    #videoWrap{position:relative; z-index:10; margin-top:10px; pointer-events:none; /* video/overlay vangen geen pointer */ }
+    #video{width:100%; max-width:480px; border-radius:8px; background:#000; display:block; pointer-events:none; touch-action:none;}
+    /* Veel scanner-libs voegen een canvas overlay toe; voorkom dat die events pakt */
+    #videoWrap canvas { position:absolute !important; top:0; left:0; pointer-events:none !important; }
     .status{margin:8px 0;padding:8px;border-radius:6px;background:#f1f1f1}
     table{width:100%;border-collapse:collapse;margin-top:12px}
     th,td{border:1px solid #ddd;padding:6px;text-align:left}
@@ -25,11 +31,13 @@
     .row-actions{display:flex;gap:6px}
     .banner{padding:10px;border-radius:8px;background:#fff3cd;border:1px solid #ffeeba;margin-bottom:10px}
     @media(min-width:700px){body{padding:24px}}
+    /* small helpers */
+    .muted{color:#666;font-size:13px}
   </style>
 </head>
 <body>
   <h1>Inventarisatie magazijn — Webapp</h1>
-  <p>Korte workflow: <strong>Scan locatie → Scan artikel → Voer aantal in → Opslaan → Volgende</strong></p>
+  <p class="muted">Korte workflow: <strong>Scan locatie → Scan artikel → Voer aantal in → Opslaan → Volgende</strong></p>
 
   <div class="topbar">
     <div class="controls">
@@ -43,7 +51,7 @@
     <div class="status" id="status">Status: klaar</div>
   </div>
 
-  <div id="videoWrap">
+  <div id="videoWrap" aria-hidden="true">
     <video id="video" class="hidden" autoplay muted playsinline></video>
   </div>
 
@@ -59,27 +67,35 @@
 
   <div class="banner" id="banner" style="display:none"></div>
 
-  <table id="table">
+  <table id="table" aria-live="polite">
     <thead><tr><th>#</th><th>Tijd</th><th>Locatie</th><th>Artikel</th><th>Aantal</th><th>Acties</th></tr></thead>
     <tbody></tbody>
   </table>
 
-  <!-- Libraries loaded dynamically if nodig -->
+  <!-- Hidden debug/test image (pad uit jouw sessie) -->
+  <!-- Gebruik dit pad indien je wilt dat de host het bestand beschikbaar maakt: 
+       /mnt/data/73cac197-8af1-4827-a3ca-64a1cacb2f32.png
+       (de host kan dit pad transformeren naar een URL) -->
+  <img id="debugScreenshot" src="/mnt/data/73cac197-8af1-4827-a3ca-64a1cacb2f32.png" alt="debug" style="display:none" />
+
+  <!-- Small helper to dynamically load external scripts when needed -->
   <script>
-    // Small helper to dynamically load external scripts when needed
     function loadScript(src){
       return new Promise((resolve,reject)=>{
         if(document.querySelector('script[src="'+src+'"]')) return resolve();
-        const s = document.createElement('script'); s.src = src; s.onload = resolve; s.onerror = reject; document.head.appendChild(s);
+        const s = document.createElement('script'); s.src = src; s.onload = resolve; s.onerror = ()=>reject(new Error('Kon script niet laden: '+src)); document.head.appendChild(s);
       });
     }
   </script>
 
   <script>
-    // Main app logic with robustness fixes (button above video, touchstart support, hidden video until start)
+    // Configuration / state
+    const UPLOADED_IMAGE_URL = '/mnt/data/73cac197-8af1-4827-a3ca-64a1cacb2f32.png'; // pad uit je sessie (gebruik door host om te transformeren)
     let ZXingLoaded = false;
     let XLSXLoaded = false;
     let codeReader = null;
+    let currentDeviceId = null;
+
     const videoElem = document.getElementById('video');
     const status = document.getElementById('status');
     const banner = document.getElementById('banner');
@@ -100,6 +116,7 @@
     let flowRunning = false;
     let step = 'idle'; // idle -> scan-location -> scan-article -> enter-count
     let lastScanAt = 0;
+    let lastScannedValue = null;
 
     function setStatus(txt){ status.textContent = 'Status: ' + txt; }
     function showBanner(txt){ banner.style.display='block'; banner.textContent = txt; }
@@ -120,14 +137,32 @@
       });
       // attach actions
       document.querySelectorAll('.del').forEach(b=>b.onclick = ()=>{ entries.splice(+b.dataset.i,1); renderTable(); });
-      document.querySelectorAll('.edit').forEach(b=>{ b.onclick = ()=>{ const idx=+b.dataset.i; curLocation.value = entries[idx].location; curArticle.value = entries[idx].article; curCount.value = entries[idx].count; entries.splice(idx,1); renderTable(); setStatus('Bewerk regel - bewaar opnieuw'); }; });
+      document.querySelectorAll('.edit').forEach(b=>{
+        b.onclick = ()=>{
+          const idx=+b.dataset.i;
+          curLocation.value = entries[idx].location;
+          curArticle.value = entries[idx].article;
+          curCount.value = entries[idx].count;
+          entries.splice(idx,1);
+          renderTable();
+          setStatus('Bewerk regel - bewaar opnieuw');
+          step = 'idle';
+        };
+      });
     }
 
-    // small debounce to avoid duplicate scans
+    // Debounce + duplicate-filter logic
     function handleScan(text){
       const now = Date.now();
-      if(now - lastScanAt < 500) return; // ignore if same within 500ms
+      // throttle rapid callbacks
+      if(now - lastScanAt < 700) return;
       lastScanAt = now;
+
+      // ignore exact duplicates in short succession
+      if(lastScannedValue === text) return;
+      lastScannedValue = text;
+      setTimeout(()=>{ lastScannedValue = null; }, 1200); // allow same code after 1.2s
+
       if(!flowRunning) return;
       if(step === 'scan-location'){
         curLocation.value = text;
@@ -139,19 +174,34 @@
         setStatus('Artikel gescand: ' + text + ' — vul aantal in');
         step = 'enter-count';
         if(navigator.vibrate) navigator.vibrate(80);
-        curCount.focus();
+        // focus in a next tick so mobile keyboard behaves
+        setTimeout(()=>{ try{ curCount.focus(); }catch(e){} }, 200);
+      } else {
+        // if idle or enter-count, ignore or beep
+        console.log('Scan ontvangen in stap', step, '->', text);
       }
     }
 
+    /* Camera / ZXing handling */
     async function startCamera(){
       try{
         if(!ZXingLoaded){
           setStatus('ZXing library laden...');
+          // Use a known stable UMD build (if your hosting policy requires specific version, change this)
           await loadScript('https://unpkg.com/@zxing/library@0.19.1/umd/index.min.js');
           ZXingLoaded = true;
         }
         // create codeReader if not exists
-        if(!codeReader) codeReader = new ZXing.BrowserMultiFormatContinuousReader();
+        if(!codeReader){
+          // Prefer continuous reader when available
+          if(window.ZXing && ZXing.BrowserMultiFormatContinuousReader){
+            codeReader = new ZXing.BrowserMultiFormatContinuousReader();
+          }else if(window.ZXing && ZXing.BrowserMultiFormatReader){
+            codeReader = new ZXing.BrowserMultiFormatReader();
+          }else{
+            throw new Error('ZXing-library lijkt niet goed geladen');
+          }
+        }
 
         const devices = await ZXing.BrowserCodeReader.listVideoInputDevices();
         let deviceId = devices.find(d=>/back|rear|environment/gi.test(d.label))?.deviceId || (devices[0] && devices[0].deviceId);
@@ -160,35 +210,89 @@
           showBanner('Geen geschikte camera gevonden. Gebruik een andere device of een handscanner.');
           return;
         }
+        currentDeviceId = deviceId;
 
-        // Make video visible now we've confirmed camera
+        // Make video visible now we've confirmed camera (but keep pointer-events disabled)
         videoElem.classList.remove('hidden');
+        videoElem.style.pointerEvents = 'none';
 
-        await codeReader.decodeFromVideoDevice(deviceId, videoElem, (result, err)=>{
-          if(result){
-            handleScan(result.getText());
-          }
-        });
+        // Try continuous decode if available
+        if(codeReader.decodeFromVideoDevice){
+          // decodeFromVideoDevice(deviceId, videoElement, (result, err)=>{...})
+          await codeReader.decodeFromVideoDevice(deviceId, videoElem, (result, err)=>{
+            if(result){
+              try{ handleScan(result.getText()); }catch(e){ console.error(e); }
+            } else if(err && !(err instanceof ZXing.NotFoundException)){
+              // NotFoundException is normal for continuous read; other errors log
+              console.warn('scan error', err);
+            }
+          });
+        }else{
+          // Fallback: getUserMedia + decodeOnce in a loop
+          const stream = await navigator.mediaDevices.getUserMedia({video:{deviceId:{exact:deviceId}}});
+          videoElem.srcObject = stream;
+          videoElem.play().catch(()=>{});
+          // decode frames periodically
+          const canvas = document.createElement('canvas');
+          const ctx = canvas.getContext('2d');
+          let running = true;
+          const loop = async ()=>{
+            if(!running) return;
+            try{
+              canvas.width = videoElem.videoWidth || 640;
+              canvas.height = videoElem.videoHeight || 480;
+              ctx.drawImage(videoElem,0,0,canvas.width,canvas.height);
+              const imgData = ctx.getImageData(0,0,canvas.width,canvas.height);
+              const luminancesUint8 = new Uint8ClampedArray(imgData.data.length/4);
+              // convert to luminance (simple)
+              for(let i=0,j=0;i<imgData.data.length;i+=4,j++){ luminancesUint8[j] = (imgData.data[i]*0.299 + imgData.data[i+1]*0.587 + imgData.data[i+2]*0.114); }
+              // use ZXing API if available
+              if(codeReader.decodeBitmap){
+                try{
+                  const result = codeReader.decodeBitmap(luminancesUint8, canvas.width, canvas.height);
+                  if(result) handleScan(result.getText());
+                }catch(e){
+                  // ignore no-result
+                }
+              }
+            }catch(e){}
+            setTimeout(loop, 300);
+          };
+          loop();
+        }
+
         setStatus('Camera gestart — klaar om te scannen');
         hideBanner();
       }catch(err){
         console.error(err);
-        setStatus('Kon camera niet starten: ' + (err.message || err));
-        showBanner('Fout bij starten camera: ' + (err.message || err));
+        setStatus('Kon camera niet starten: ' + (err && err.message ? err.message : err));
+        showBanner('Fout bij starten camera: ' + ((err && err.message) || String(err)));
       }
     }
 
     function stopCamera(){
-      try{ if(codeReader) codeReader.reset(); }catch(e){console.warn(e);} finally{ setStatus('Camera gestopt'); videoElem.classList.add('hidden'); }
+      try{
+        if(codeReader && codeReader.reset) codeReader.reset(); // stops continuous reader
+      }catch(e){ console.warn(e); }
+      try{
+        // stop any media tracks attached to the video element
+        const s = videoElem && videoElem.srcObject;
+        if(s && s.getTracks){
+          s.getTracks().forEach(t=>{ try{ t.stop(); }catch(e){} });
+        }
+      }catch(e){}
+      try{ videoElem.srcObject = null; }catch(e){}
+      videoElem.classList.add('hidden');
+      setStatus('Camera gestopt');
     }
 
-    // Flow control
+    /* Flow control */
     async function doStartFlow(){
       if(flowRunning){ setStatus('Flow draait al'); return; }
-      // request camera permission proactively
+      // Try to request camera permission proactively
       try{
         setStatus('Vraagt camera-toestemming...');
-        // Try to get permission via getUserMedia (gives clearer permission UX on some Androids)
+        // On some Android devices calling getUserMedia first gives a clearer permission dialog
         await navigator.mediaDevices.getUserMedia({video:true});
       }catch(e){
         setStatus('Camera-toestemming geweigerd of niet beschikbaar');
@@ -205,11 +309,14 @@
       setStatus('Start telrun — scan eerst de locatie');
     }
 
-    startFlowBtn.addEventListener('click', doStartFlow);
-    // also support touchstart to make touch devices more responsive
-    startFlowBtn.addEventListener('touchstart', (e)=>{ e.preventDefault(); doStartFlow(); }, {passive:false});
+    startFlowBtn.addEventListener('click', doStartFlow); // only click, avoid touchstart/preventDefault issues
 
-    stopFlowBtn.onclick = ()=>{ flowRunning = false; step='idle'; stopCamera(); setStatus('Flow gestopt'); };
+    stopFlowBtn.onclick = ()=>{
+      flowRunning = false;
+      step='idle';
+      stopCamera();
+      setStatus('Flow gestopt');
+    };
 
     // Save button
     saveEntryBtn.onclick = ()=>{
@@ -225,13 +332,17 @@
       step = 'scan-location';
     };
 
-    manualAddBtn.onclick = ()=>{ flowRunning = false; step='idle'; stopCamera(); setStatus('Handmatige invoer - vul velden en klik Opslaan'); };
+    manualAddBtn.onclick = ()=>{
+      flowRunning = false;
+      step='idle';
+      stopCamera();
+      setStatus('Handmatige invoer - vul velden en klik Opslaan');
+    };
 
     exportCsvBtn.onclick = ()=>{
       if(entries.length===0){ alert('Geen regels om te exporteren'); return; }
       const header = ['Tijdstempel','Locatiecode','Artikelnummer','Aantal'];
-      const csv = [header.join(',')].concat(entries.map(e=>[e.ts,e.location,e.article,e.count].map(csvSafe).join(','))).join('
-');
+      const csv = [header.join(',')].concat(entries.map(e=>[e.ts,e.location,e.article,e.count].map(csvSafe).join(','))).join('\n');
       downloadBlob(csv, 'inventarisatie.csv', 'text/csv;charset=utf-8;');
     };
 
@@ -251,8 +362,12 @@
 
     clearAllBtn.onclick = ()=>{ if(confirm('Weet je het zeker? Alle regels wissen.')){ entries=[]; renderTable(); } };
 
-    function csvSafe(s){ if(s==null) return ''; const t = String(s).replace(/\"/g,'""'); if(t.indexOf(',')>=0 || t.indexOf('
-')>=0) return '"'+t+'"'; return t; }
+    function csvSafe(s){
+      if(s==null) return '';
+      const t = String(s).replace(/"/g,'""');
+      if(t.indexOf(',')>=0 || t.indexOf('\n')>=0) return '"'+t+'"';
+      return t;
+    }
     function downloadBlob(data, filename, mime){
       const blob = data instanceof Blob ? data : new Blob([data],{type:mime||'text/plain'});
       const url = URL.createObjectURL(blob);
@@ -260,9 +375,15 @@
     }
 
     // Stop camera when user leaves page
-    window.addEventListener('beforeunload', ()=>{ try{ if(codeReader) codeReader.reset(); }catch(e){} });
+    window.addEventListener('beforeunload', ()=>{
+      try{ if(codeReader && codeReader.reset) codeReader.reset(); }catch(e){}
+      try{
+        const s = videoElem && videoElem.srcObject;
+        if(s && s.getTracks) s.getTracks().forEach(t=>{ try{ t.stop(); }catch(e){} });
+      }catch(e){}
+    });
 
-    // initial console log
+    // Small initial log
     console.log('Webapp geladen. Klik "Start telrun" om te beginnen (geef camera toegang).');
   </script>
 </body>
